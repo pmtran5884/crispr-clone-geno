@@ -69,6 +69,56 @@ def test_split_gap_is_merged_into_one_excision(locus):
     assert classify_read(read, locus).allele_class == "dual_del"
 
 
+def test_truncated_read_is_rescued(locus):
+    # ~12 bp lost to end trimming removes one primer but not the cut sites
+    wt, join = locus.amplicon, locus.join_allele
+    assert classify_read(wt[:-12], locus, clip="end").allele_class == "wt"
+    assert classify_read(wt[12:], locus, clip="begin").allele_class == "wt"
+    assert classify_read(join[:-12], locus, clip="end").allele_class == "dual_del"
+
+
+def test_truncated_read_short_of_a_cut_is_refused(locus):
+    # stops before the g2 cut at 130: cannot tell wild type from the deletion
+    call = classify_read(locus.amplicon[:120], locus, clip="end")
+    assert call.allele_class == "uninformative_partial"
+
+
+def test_prep_marks_single_primer_reads(locus):
+    r = prep_read("a", locus.amplicon[:-12], locus)
+    assert r.primer_status == "fwd_only" and r.clip == "end"
+    assert r.trimmed == locus.amplicon[:-12]
+
+
+def test_call_alleles_uses_truncated_reads(locus):
+    full = [locus.amplicon] * 40 + [locus.join_allele] * 40
+    part = [locus.amplicon[:-12]] * 60 + [locus.join_allele[:-12]] * 60
+    alleles = call_alleles(full + part, locus,
+                           clips=["none"] * len(full) + ["end"] * len(part))
+    got = {a.allele_class: a.n_reads for a in alleles}
+    assert got.get("wt", 0) == 100 and got.get("dual_del", 0) == 100
+
+
+def test_in_frame_insertion_with_a_stop_is_disrupting(locus):
+    # length divisible by three keeps the frame, but the insert carries TAA
+    from crispr_clone.alleles import align_events, protein_consequence
+    from crispr_clone.genotype import is_disrupting
+    seq = locus.amplicon[:130] + "TAACCGTTA" + locus.amplicon[130:]
+    ev, _, _, _ = align_events(seq, locus.amplicon)
+    frame, note = protein_consequence(seq, locus, ev)
+    assert frame == "in_frame_stop" and "premature stop" in note
+    alleles = call_alleles([seq] * 50, locus)
+    assert any(is_disrupting(a) for a in alleles)
+
+
+def test_cancelling_indels_scramble_the_middle(locus):
+    from crispr_clone.alleles import align_events, protein_consequence
+    wt = locus.amplicon
+    seq = wt[:62] + wt[63:128] + "T" + wt[128:]
+    ev, _, _, _ = align_events(seq, wt)
+    frame, _ = protein_consequence(seq, locus, ev)
+    assert frame == "internal_frameshift"
+
+
 def test_find_all_counts_concatemer_copies(locus):
     read = locus.amplicon * 3
     assert len(find_all(read, locus.fwd)) == 3

@@ -95,6 +95,7 @@ class PreppedRead:
     trimmed_len: int          # 0 when no complete span
     span_len: int             # first primer to last primer, i.e. the gel band
     band_len: int             # span_len when primed, raw_len otherwise
+    clip: str                 # 'none' (both primers) | 'end' | 'begin' (one primer)
     seq: str                  # oriented, full-length read (never trimmed)
     trimmed: str              # first complete primer-to-primer span, else ''
 
@@ -137,11 +138,26 @@ def prep_read(read_id: str, seq: str, locus: Locus, max_frac: float = 0.25) -> P
     else:
         status = "none"
 
-    trimmed = seq[units[0][0]:units[0][1]] if units else ""
+    # A read that lost one end keeps the other primer as an anchor and is
+    # still genotypable if it spans both cut sites: discarding it would throw
+    # away most of a real ONT run, where end trimming routinely eats into the
+    # insert. The clip tells the aligner which reference end to leave free.
+    if units:
+        trimmed, clip = seq[units[0][0]:units[0][1]], "none"
+    elif f_hits and not r_hits:
+        trimmed, clip = seq[f_hits[0][0]:], "end"
+    elif r_hits and not f_hits:
+        trimmed, clip = seq[:r_hits[-1][1]], "begin"
+    else:
+        trimmed, clip = "", ""
     # the gel band is the primer-to-primer molecule: adapter and barcode
     # remnants smear raw length by 10-20 bp and would split one band into
     # several spurious modes
     span_len = (units[-1][1] - units[0][0]) if units else 0
+    # a concatemer whose last primer copy was lost to end trimming yields one
+    # complete unit and would otherwise be binned at monomer length, putting a
+    # 300 bp molecule in the 167 bp band
+    multi = len(f_hits) > 1 or len(r_hits) > 1
     return PreppedRead(
         read_id=read_id,
         raw_len=len(seq),
@@ -152,7 +168,8 @@ def prep_read(read_id: str, seq: str, locus: Locus, max_frac: float = 0.25) -> P
         primer_status=status,
         trimmed_len=len(trimmed),
         span_len=span_len,
-        band_len=span_len if units else len(seq),
+        band_len=len(seq) if multi else (span_len if units else len(seq)),
+        clip=clip,
         seq=seq,
         trimmed=trimmed,
     )

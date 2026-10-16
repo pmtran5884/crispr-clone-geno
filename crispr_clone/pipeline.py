@@ -13,7 +13,13 @@ from .locus import Locus
 from .prep import PreppedRead, collect_fastq, prep_sample
 from .spectrum import Mode, assign_reads, attach_consensus, call_modes
 
-ON_TARGET = {"wt", "dual_del", "large_del", "inversion", "other_indel"}
+ON_TARGET = {"wt", "dual_del", "large_del", "inversion", "other_indel",
+             "partial_pending", "concatemer"}
+# concatemers are a library artifact, not a distinct PCR product: their units
+# are real copies of the sample's molecules, so each read is genotyped once
+# from its first unit and reported separately as a QC number. Dropping them
+# would bias against short alleles, which concatemerise most readily.
+NOT_ARTIFACT = {"concatemer"}
 
 
 def is_on_target(cls: str) -> bool:
@@ -38,14 +44,22 @@ class SampleResult:
 
 
 def classify_reads(reads: Sequence[PreppedRead], locus: Locus
-                   ) -> tuple[list[str], list[ReadCall], list[str]]:
-    """Per-read class, plus the on-target calls and their trimmed sequences."""
+                   ) -> tuple[list[str], list[ReadCall], list[str], list[str]]:
+    """Per-read class, plus the on-target calls, sequences and clip modes."""
     classes: list[str] = []
     calls: list[ReadCall] = []
     seqs: list[str] = []
+    clips: list[str] = []
     for r in reads:
-        if r.n_units >= 2:
+        if r.n_units >= 2 or (r.n_units == 1 and max(r.n_fwd, r.n_rev) > 1):
             classes.append("concatemer")
+            c = classify_read(r.trimmed, locus)
+            if c.allele_class not in ("unalignable", "too_short",
+                                      "uninformative_partial"):
+                c.read_id = r.read_id
+                calls.append(c)
+                seqs.append(r.trimmed)
+                clips.append("none")
             continue
         if r.n_units == 1:
             c = classify_read(r.trimmed, locus)
@@ -59,16 +73,21 @@ def classify_reads(reads: Sequence[PreppedRead], locus: Locus
                 c.read_id = r.read_id
                 calls.append(c)
                 seqs.append(r.trimmed)
+                clips.append("none")
             continue
-        if r.primer_status == "fwd_only":
-            classes.append("truncated_fwd_only")
-        elif r.primer_status == "rev_only":
-            classes.append("truncated_rev_only")
-        else:
+        if r.clip in ("end", "begin"):
+            # one primer lost to end trimming. Whether the read is usable is
+            # decided during allele assignment, where it is matched against
+            # the alleles that full-length reads discovered.
+            classes.append("partial_pending")
+            seqs.append(r.trimmed)
+            clips.append(r.clip)
+            continue
+        if True:
             id_dimer = identity_to(r.seq, locus.dimer_allele)
             classes.append("primer_dimer" if (len(r.seq) <= len(locus.dimer_allele) + 15
                                               and id_dimer >= 0.70) else "unknown")
-    return classes, calls, seqs
+    return classes, calls, seqs, clips
 
 
 def run_sample(sample: str, inputs: Sequence[str], locus: Locus, outdir: str,
@@ -84,27 +103,45 @@ def run_sample(sample: str, inputs: Sequence[str], locus: Locus, outdir: str,
     if not reads:
         raise SystemExit(f"{sample}: no reads found in {inputs}")
 
-    classes, calls, seqs = classify_reads(reads, locus)
+    classes, calls, seqs, clips = classify_reads(reads, locus)
     band_lengths = [r.band_len for r in reads]
     raw_seqs = [r.seq for r in reads]
 
     modes = call_modes(band_lengths, min_frac=min_mode_frac, min_reads=min_mode_reads)
     assign = assign_reads(modes, band_lengths)
     attach_consensus(modes, raw_seqs, assign)
-    expl = [explain_sequence(m.consensus, locus) for m in modes]
+    # tell the explainer how many reads in each mode lost an end, so a
+    # truncation peak is not presented as a distinct PCR product
+    frac_partial = []
+    for i in range(len(modes)):
+        members = [reads[j] for j, a in enumerate(assign) if a == i]
+        frac_partial.append(sum(1 for m in members if m.clip in ("end", "begin"))
+                            / max(len(members), 1))
+    expl = [explain_sequence(m.consensus, locus, partial_fraction=f)
+            for m, f in zip(modes, frac_partial)]
 
-    alleles = call_alleles(seqs, locus, control_event_freq=control_event_freq)
+    alleles = call_alleles(seqs, locus, control_event_freq=control_event_freq,
+                           clips=clips)
     if control_alleles:
         annotate_control(alleles, control_alleles)
     artifact_counts: dict[str, int] = {}
     for c in classes:
         if not is_on_target(c):
             artifact_counts[c] = artifact_counts.get(c, 0) + 1
-    n_artifact = sum(artifact_counts.values())
+    # truncated reads that matched no allele, or that stop short of a cut
+    # site, are unusable after all and are counted as artifacts here
+    unmatched = len(seqs) - sum(a.n_reads for a in alleles)
+    if unmatched > 0:
+        artifact_counts["truncated_unmatched"] = unmatched
+    n_concat = sum(1 for c in classes if c == "concatemer")
+    if n_concat:
+        artifact_counts["concatemer(genotyped from first unit)"] = n_concat
+    n_artifact = sum(v for k, v in artifact_counts.items()
+                     if not k.startswith("concatemer"))
 
     gcall = call_genotype(sample, alleles, len(reads), n_artifact,
                           min_allele_frac=min_allele_frac, min_depth=min_depth)
-    pile = pileup(seqs, locus)
+    pile = pileup(seqs, locus, clips=clips)
 
     figures: dict[str, str] = {}
     if make_figures:
@@ -119,7 +156,7 @@ def run_sample(sample: str, inputs: Sequence[str], locus: Locus, outdir: str,
             pile, locus, sample, os.path.join(outdir, f"{sample}_pileup.png"))
 
     from .alleles import event_frequency
-    result_event_freq = event_frequency(seqs, locus)
+    result_event_freq = event_frequency(seqs, locus, clips=clips)
 
     return SampleResult(sample=sample, locus=locus, n_total=len(reads),
                         read_classes=classes, band_lengths=band_lengths,

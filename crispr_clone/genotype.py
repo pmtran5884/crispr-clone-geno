@@ -59,11 +59,20 @@ class GenotypeCall:
 
 
 def is_disrupting(a: Allele) -> bool:
+    """Does this allele actually destroy the reading frame?
+
+    An in-frame deletion is an edit, not a knockout, however large. Two
+    cancelling indels only count when the scrambled stretch between them
+    carries a stop codon.
+    """
     if a.allele_class == "wt":
         return False
     if a.allele_class == "inversion":
         return True
-    return a.frame == "frameshift" or a.allele_class in DISRUPTING
+    if a.frame == "frameshift":
+        return True
+    # an in-frame edit still disrupts the protein if it introduces a stop
+    return "premature stop" in a.consequence
 
 
 def fit_ratio(fractions: Sequence[float], counts: Sequence[int],

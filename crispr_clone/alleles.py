@@ -28,6 +28,13 @@ import parasail
 from .locus import Locus, rc
 
 MATRIX = parasail.matrix_create("ACGT", 2, -4)
+# a read missing one end is aligned with that reference end free, so the
+# missing primer region is not scored as a deletion
+ALIGNERS = {
+    "none": parasail.nw_trace_scan_sat,
+    "end": parasail.sg_de_trace_scan_sat,      # free gap at the reference 3' end
+    "begin": parasail.sg_db_trace_scan_sat,    # free gap at the reference 5' end
+}
 GAP_OPEN = 8      # affine gaps tuned for ONT: cheap to open relative to a run
 GAP_EXTEND = 1    # of mismatches, cheap to extend so a 67 bp excision is found
 
@@ -102,11 +109,16 @@ def _merge_close(raw: list[tuple[int, int, str]], ref: str,
     return out
 
 
-def align_events(read: str, ref: str) -> tuple[list[Event], float, int]:
-    """Global-align `read` to `ref`; return (events, identity, score)."""
+def align_events(read: str, ref: str, clip: str = "none"
+                 ) -> tuple[list[Event], float, int, tuple[int, int]]:
+    """Align `read` to `ref`; return (events, identity, score, covered_span).
+
+    `clip` is 'none' for a full primer-to-primer read, 'end' for a read that
+    lost its 3' end, 'begin' for one that lost its 5' end.
+    """
     if not read:
-        return [], 0.0, 0
-    res = parasail.nw_trace_scan_sat(read, ref, GAP_OPEN, GAP_EXTEND, MATRIX)
+        return [], 0.0, 0, (0, 0)
+    res = ALIGNERS.get(clip, ALIGNERS["none"])(read, ref, GAP_OPEN, GAP_EXTEND, MATRIX)
     cig = res.cigar.decode
     qpos = rpos = 0
     matches = mismatches = 0
@@ -144,6 +156,19 @@ def align_events(read: str, ref: str) -> tuple[list[Event], float, int]:
     if pend_r is not None:
         raw.append(pend_r)
 
+    # the free terminal gap is missing sequence, not a deletion
+    covered = [0, len(ref)]
+    if clip == "end" and raw:
+        rs, dl, ins = raw[-1]
+        if dl and not ins and rs + dl >= len(ref):
+            covered[1] = rs
+            raw.pop()
+    elif clip == "begin" and raw:
+        rs, dl, ins = raw[0]
+        if dl and not ins and rs == 0:
+            covered[0] = dl
+            raw.pop(0)
+
     raw = _merge_close(raw, ref)
     events = []
     for rs, dl, ins in raw:
@@ -154,13 +179,24 @@ def align_events(read: str, ref: str) -> tuple[list[Event], float, int]:
     # mismatches, while an off-target product still scores badly because its
     # aligned columns disagree base by base
     identity = matches / max(1, matches + mismatches)
-    return events, identity, res.score
+    return events, identity, res.score, (covered[0], covered[1])
 
 
-def identity_to(read: str, ref: str) -> float:
-    """Edit-distance identity of a read against a reference (global)."""
+def identity_to(read: str, ref: str, clip: str = "none") -> float:
+    """Edit-distance identity of a read against a reference.
+
+    With `clip`, the missing end of the reference is free, so a truncated
+    read is scored on what it actually covers.
+    """
     if not read:
         return 0.0
+    if clip == "end":
+        d = edlib.align(read, ref, mode="SHW", task="distance")["editDistance"]
+        return 1.0 - d / max(1, len(read))
+    if clip == "begin":
+        d = edlib.align(read[::-1], ref[::-1], mode="SHW",
+                        task="distance")["editDistance"]
+        return 1.0 - d / max(1, len(read))
     d = edlib.align(read, ref, mode="NW", task="distance")["editDistance"]
     return 1.0 - d / max(len(ref), len(read))
 
@@ -179,7 +215,7 @@ class ReadCall:
 def classify_read(read: str, locus: Locus, window: int = 10,
                   junction_tol: int = 20, min_identity: float = 0.70,
                   min_len: int | None = None,
-                  max_indel_frac: float = 0.8) -> ReadCall:
+                  max_indel_frac: float = 0.8, clip: str = "none") -> ReadCall:
     """Assign one trimmed read to an allele class."""
     if not read:
         return ReadCall("", "unalignable", (), 0, 0.0, 0)
@@ -197,7 +233,25 @@ def classify_read(read: str, locus: Locus, window: int = 10,
         return ReadCall("", "inversion", (("inv", locus.cut_left, locus.cut_right),),
                         0, id_inv, len(read))
 
-    events, identity, _ = align_events(read, wt)
+    if clip != "none":
+        # A free end gap lets a real internal deletion migrate to the end, so
+        # a truncated read is never event-extracted. It is matched against the
+        # canonical alleles instead, and only counted when it still covers the
+        # region where those alleles differ.
+        cands = [("wt", wt)]
+        if locus.is_dual:
+            cands += [("dual_del", locus.join_allele),
+                      ("inversion", locus.inversion_allele)]
+        scored = [(identity_to(read, ref, clip), cls, ref) for cls, ref in cands]
+        best_id, best_cls, best_ref = max(scored)
+        if best_id < min_identity:
+            return ReadCall("", "unalignable", (), 0, best_id, len(read))
+        if not partial_informative(read, best_ref, clip, locus, window):
+            return ReadCall("", "uninformative_partial", (), 0, best_id, len(read))
+        net = len(best_ref) - len(wt)
+        return ReadCall("", best_cls, (), net, best_id, len(read))
+
+    events, identity, _, covered = align_events(read, wt, clip)
     indel_burden = sum(e.del_len + len(e.ins_seq) for e in events)
     if identity < min_identity or indel_burden > max_indel_frac * len(wt):
         # either the aligned columns disagree, or explaining the read needs
@@ -232,6 +286,66 @@ def classify_read(read: str, locus: Locus, window: int = 10,
 
 
 # --------------------------------------------------------------- clustering
+CODONS = {}
+_BASES = "TCAG"
+_AAS = ("FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG")
+for _i, _c in enumerate([a + b + c for a in _BASES for b in _BASES for c in _BASES]):
+    CODONS[_c] = _AAS[_i]
+
+
+def protein_consequence(consensus: str, locus: Locus, events: Sequence[Event]
+                        ) -> tuple[str, str]:
+    """Reading-frame verdict and protein consequence for one allele.
+
+    Frame arithmetic alone is not enough. An insertion whose length is a
+    multiple of three keeps the downstream frame but can still carry a stop
+    codon in the inserted sequence, and two indels that cancel out leave the
+    stretch between them in a shifted frame. Both cases are decided by
+    translating the allele, not by counting bases.
+    """
+    span = locus.coding.get("exonic_span")
+    if not span or not events:
+        return ("wild_type" if not events else "unknown"), ""
+
+    phase = locus.coding.get("frame_of_exonic_start", 0)
+    start = span[0] + (-phase) % 3
+    first_codon = locus.coding.get("codon_of_exonic_start", 1)
+
+    stop_at = None
+    for i in range(start, len(consensus) - 2, 3):
+        if CODONS.get(consensus[i:i + 3], "X") == "*":
+            stop_at = first_codon + (i - start) // 3
+            break
+
+    net = sum(e.net for e in events)
+    cum, scrambled = 0, False
+    for e in sorted(events, key=lambda ev: ev.ref_start):
+        cum += e.net
+        if cum % 3:
+            scrambled = True
+
+    if net % 3:
+        note = "frame shifted downstream; premature stop expected"
+        if stop_at:
+            note = f"frameshift with a premature stop at about codon {stop_at}"
+        return "frameshift", note
+
+    n = abs(net) // 3
+    verb = "deletion" if net < 0 else "insertion"
+    size = f"in-frame {verb} of {n} codon{'s' if n != 1 else ''}" if n else "no net change"
+
+    if stop_at is not None:
+        label = "internal_frameshift" if scrambled else "in_frame_stop"
+        return label, f"{size} but a premature stop at about codon {stop_at}"
+    if scrambled:
+        n_scr = max(1, (max(e.ref_start for e in events)
+                        - min(e.ref_start for e in events)) // 3)
+        return "internal_frameshift", (
+            f"{n_scr} codons translated in a shifted frame, frame restored "
+            f"after; no stop inside the amplicon")
+    return "in_frame", size
+
+
 @dataclass
 class Allele:
     allele_id: str
@@ -248,6 +362,7 @@ class Allele:
     minor: bool = False      # below the fraction any clonal ratio could produce
     control_fraction: float = 0.0    # same allele's fraction in the control
     within_control_noise: bool = False
+    consequence: str = ""            # protein-level reading of `frame`
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -273,7 +388,35 @@ def _consensus(seqs: Sequence[str], cap: int = 200) -> str:
         return Counter(seqs).most_common(1)[0][0]
 
 
-def coarse_class(read: str, locus: Locus) -> str:
+def partial_informative(read: str, ref: str, clip: str, locus: Locus,
+                        window: int = 10) -> bool:
+    """Does a truncated read still cover the region where alleles differ?
+
+    All alleles share the primer flanks, so the tolerable loss is measured as
+    a distance from the reference end: everything beyond the far cut site
+    plus a margin is dispensable, everything inside it is not. Without this
+    check a read that stops before the second cut matches wild type perfectly
+    and biases every clone toward wild type.
+    """
+    wt = locus.amplicon
+    if clip == "end":
+        spare = len(wt) - (locus.cut_right + window)
+        res = edlib.align(read, ref, mode="SHW", task="locations")
+        if res["editDistance"] == -1 or not res["locations"]:
+            return False
+        end = res["locations"][0][1]
+        return end is not None and end + 1 >= len(ref) - max(spare, 0)
+    if clip == "begin":
+        spare = max(locus.cut_left - window, 0)
+        res = edlib.align(read[::-1], ref[::-1], mode="SHW", task="locations")
+        if res["editDistance"] == -1 or not res["locations"]:
+            return False
+        end = res["locations"][0][1]
+        return end is not None and end + 1 >= len(ref) - spare
+    return True
+
+
+def coarse_class(read: str, locus: Locus, clip: str = "none") -> str:
     """Error-robust first split: only large-scale structure, no 1 bp calls.
 
     Single-nucleotide ONT errors are common enough that per-read indel calls
@@ -284,11 +427,11 @@ def coarse_class(read: str, locus: Locus) -> str:
     if not read:
         return "unassigned"
     if locus.is_dual:
-        id_wt = identity_to(read, locus.amplicon)
-        id_inv = identity_to(read, locus.inversion_allele)
+        id_wt = identity_to(read, locus.amplicon, clip)
+        id_inv = identity_to(read, locus.inversion_allele, clip)
         if id_inv > id_wt + 0.05 and id_inv >= 0.80:
             return "inversion"
-    events, identity, _ = align_events(read, locus.amplicon)
+    events, identity, _, _ = align_events(read, locus.amplicon, clip)
     big = [e for e in events if max(e.del_len, len(e.ins_seq)) >= 10]
     if big:
         if locus.is_dual:
@@ -302,16 +445,17 @@ def coarse_class(read: str, locus: Locus) -> str:
     return "small"
 
 
-def in_window_events(read: str, locus: Locus, window: int = 10) -> list[Event]:
+def in_window_events(read: str, locus: Locus, window: int = 10,
+                     clip: str = "none") -> list[Event]:
     """Normalised indels that touch a cut-site window."""
-    events, identity, _ = align_events(read, locus.amplicon)
+    events, identity, _, _ = align_events(read, locus.amplicon, clip)
     cuts = locus.cuts
     return [e for e in events
             if any(e.overlaps(c - window, c + window) for c in cuts)]
 
 
-def event_frequency(seqs: Sequence[str], locus: Locus, window: int = 10
-                    ) -> dict[tuple, float]:
+def event_frequency(seqs: Sequence[str], locus: Locus, window: int = 10,
+                    clips: Sequence[str] | None = None) -> dict[tuple, float]:
     """How often each distinct cut-site indel appears across reads.
 
     A real allele's edit is carried by a reproducible fraction of reads; ONT
@@ -320,9 +464,10 @@ def event_frequency(seqs: Sequence[str], locus: Locus, window: int = 10
     control's frequencies can be subtracted.
     """
     n = max(len(seqs), 1)
+    clips = list(clips) if clips is not None else ["none"] * len(seqs)
     counts: Counter = Counter()
-    for sq in seqs:
-        for e in set(in_window_events(sq, locus, window)):
+    for sq, cl in zip(seqs, clips):
+        for e in set(in_window_events(sq, locus, window, cl)):
             counts[e.key()] += 1
     return {k: v / n for k, v in counts.items()}
 
@@ -332,7 +477,8 @@ def call_alleles(seqs: Sequence[str], locus: Locus, min_fraction: float = 0.05,
                  min_assign_identity: float = 0.80, cap: int = 200,
                  window: int = 10, min_event_frac: float = 0.05,
                  control_event_freq: dict[tuple, float] | None = None,
-                 control_excess: float = 0.04) -> list[Allele]:
+                 control_excess: float = 0.04,
+                 clips: Sequence[str] | None = None) -> list[Allele]:
     """Discover alleles from polished consensus sequences, then assign reads.
 
     1. split reads on error-robust coarse structure;
@@ -344,13 +490,20 @@ def call_alleles(seqs: Sequence[str], locus: Locus, min_fraction: float = 0.05,
     """
     from .spectrum import call_modes
 
-    seqs = [s for s in seqs if s]
+    clips = list(clips) if clips is not None else ["none"] * len(seqs)
+    pairs = [(s, c) for s, c in zip(seqs, clips) if s]
+    seqs = [s for s, _ in pairs]
+    clips = [c for _, c in pairs]
     n = len(seqs)
     if n == 0:
         return []
 
+    # Only full primer-to-primer reads define an allele: a read missing an end
+    # has no defined length, so it cannot seed a length mode. Truncated reads
+    # are assigned to the alleles that full reads discovered.
+    full = [s for s, c in pairs if c == "none"]
     groups: dict[str, list[str]] = defaultdict(list)
-    for s in seqs:
+    for s in full:
         groups[coarse_class(s, locus)].append(s)
 
     # (consensus, call, supporting reads) - support decides precedence
@@ -359,12 +512,12 @@ def call_alleles(seqs: Sequence[str], locus: Locus, min_fraction: float = 0.05,
     # (a) alleles that differ by a single base cannot be separated by read
     # length on ONT, so recurrent cut-site indels seed their own candidates
     cfreq = control_event_freq or {}
-    freqs = event_frequency(seqs, locus, window)
+    freqs = event_frequency(seqs, locus, window, clips)
     real_events = {k for k, f in freqs.items()
                    if f >= min_event_frac and f - cfreq.get(k, 0.0) >= control_excess}
     for key in real_events:
-        pool = [sq for sq in seqs
-                if key in {e.key() for e in in_window_events(sq, locus, window)}][:cap]
+        pool = [sq for sq, cl in zip(seqs, clips) if cl == "none"
+                and key in {e.key() for e in in_window_events(sq, locus, window, cl)}][:cap]
         cons = _consensus(pool)
         if cons:
             candidates.append((cons, classify_read(cons, locus), len(pool)))
@@ -372,12 +525,13 @@ def call_alleles(seqs: Sequence[str], locus: Locus, min_fraction: float = 0.05,
     # (b) structural alleles: coarse group x length mode. A group too small to
     # be any clonal allele is error debris - it must not seed a candidate,
     # because a junk consensus can out-rank the real allele during merging.
-    floor = max(5, int(min_fraction * n))
+    floor = max(5, int(min_fraction * max(len(full), 1)))
     for grp, members in groups.items():
         if grp == "unassigned" or len(members) < floor:
             continue
         lens = [len(s) for s in members]
-        modes = call_modes(lens, min_frac=0.05, min_reads=max(3, int(0.01 * n)),
+        modes = call_modes(lens, min_frac=0.05,
+                           min_reads=max(3, int(0.01 * max(len(full), 1))),
                            bandwidth=2, tol=length_tol)
         for m in modes:
             pool = [s for s in members if m.lo <= len(s) <= m.hi][:cap]
@@ -405,24 +559,33 @@ def call_alleles(seqs: Sequence[str], locus: Locus, min_fraction: float = 0.05,
 
     # assign every read to its nearest allele consensus
     buckets: dict[int, list[str]] = {i: [] for i in range(len(merged))}
+    full_buckets: dict[int, list[str]] = {i: [] for i in range(len(merged))}
     unassigned = 0
-    for s in seqs:
+    for s, cl in zip(seqs, clips):
         best_i, best_id = -1, 0.0
         for i, (cons, _) in enumerate(merged):
-            idv = identity_to(s, cons)
+            idv = identity_to(s, cons, cl)
             if idv > best_id:
                 best_i, best_id = i, idv
         if best_i < 0 or best_id < min_assign_identity:
             unassigned += 1
             continue
+        if cl != "none" and not partial_informative(s, merged[best_i][0], cl, locus):
+            unassigned += 1
+            continue
         buckets[best_i].append(s)
+        if cl == "none":
+            full_buckets[best_i].append(s)
 
     # polish once more, then fold candidates that converged on one sequence
+    # the consensus is polished from full reads only, so a truncated read
+    # cannot shorten the allele sequence it is assigned to
     polished: dict[str, list[str]] = defaultdict(list)
     for i in range(len(merged)):
         if not buckets[i]:
             continue
-        polished[_consensus(buckets[i])].extend(buckets[i])
+        cons = _consensus(full_buckets[i]) or merged[i][0]
+        polished[cons].extend(buckets[i])
 
     # absorb vanishing clusters (error tails) into their nearest neighbour
     fold_below = 0.005
@@ -447,16 +610,19 @@ def call_alleles(seqs: Sequence[str], locus: Locus, min_fraction: float = 0.05,
         lens = sorted(len(s) for s in members)
         lo, hi = wilson(k, n)
         cls = call.allele_class
+        consequence = ""
         if cls == "inversion":
             frame = "frameshift" if locus.del_size % 3 else "disrupted_in_frame"
+            consequence = "cassette inverted in place"
         elif cls == "wt":
             frame = "wild_type"
         else:
-            frame = locus.frame_effect(call.net)
+            ev, _, _, _ = align_events(cons, locus.amplicon)
+            frame, consequence = protein_consequence(cons, locus, ev)
         alleles.append(Allele(
             allele_id=f"A{rank}", allele_class=cls, n_reads=k, fraction=k / n,
             ci_low=lo, ci_high=hi, net=call.net, frame=frame,
-            median_length=lens[len(lens) // 2], consensus=cons,
+            median_length=len(cons), consensus=cons, consequence=consequence,
             signature=";".join(str(e) for e in call.events),
             minor=(k / n) < min_fraction,
         ))
@@ -464,7 +630,8 @@ def call_alleles(seqs: Sequence[str], locus: Locus, min_fraction: float = 0.05,
 
 
 # ------------------------------------------------------------------ pileup
-def pileup(seqs: Sequence[str], locus: Locus, cap: int = 4000):
+def pileup(seqs: Sequence[str], locus: Locus, cap: int = 4000,
+           clips: Sequence[str] | None = None):
     """Per-reference-base coverage and indel counts across the amplicon.
 
     A base deleted in a read is *not* covered, so a homozygous dual-cut clone
@@ -475,14 +642,15 @@ def pileup(seqs: Sequence[str], locus: Locus, cap: int = 4000):
     dele = [0] * n
     ins = [0] * n
     used = 0
-    for sq in seqs[:cap]:
+    clips = list(clips) if clips is not None else ["none"] * len(seqs)
+    for sq, cl in list(zip(seqs, clips))[:cap]:
         if not sq:
             continue
-        events, identity, _ = align_events(sq, locus.amplicon)
+        events, identity, _, span = align_events(sq, locus.amplicon, cl)
         if identity < 0.70:
             continue
         used += 1
-        covered = [True] * n
+        covered = [span[0] <= i < span[1] for i in range(n)]
         for e in events:
             for i in range(e.ref_start, min(e.ref_start + e.del_len, n)):
                 covered[i] = False

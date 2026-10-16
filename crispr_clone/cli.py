@@ -98,13 +98,14 @@ def main(argv=None):
         w = csv.writer(fh, delimiter="\t")
         w.writerow(["sample", "allele_id", "class", "median_length", "n_reads",
                     "fraction", "ci_low", "ci_high", "net_bp", "frame",
-                    "minor", "control_fraction", "within_control_noise",
-                    "signature", "consensus"])
+                    "consequence", "minor", "control_fraction",
+                    "within_control_noise", "signature", "consensus"])
         for r in results:
             for al in r.alleles:
                 w.writerow([r.sample, al.allele_id, al.allele_class, al.median_length,
                             al.n_reads, f"{al.fraction:.4f}", f"{al.ci_low:.4f}",
-                            f"{al.ci_high:.4f}", al.net, al.frame, int(al.minor),
+                            f"{al.ci_high:.4f}", al.net, al.frame, al.consequence,
+                            int(al.minor),
                             f"{al.control_fraction:.4f}",
                             int(al.within_control_noise), al.signature,
                             al.consensus])

@@ -26,6 +26,7 @@ ARTIFACT_CLASSES = {"primer_dimer", "off_target", "truncated_fwd_only",
                     "truncated_rev_only", "unknown", "concatemer"}
 
 HUMAN = {
+    "uninformative_partial": "truncated read that does not span both cut sites",
     "wt": "wild-type amplicon",
     "dual_del": "dual-cut deletion (both guides)",
     "inversion": "cassette inverted in place (gel-invisible knockout)",
@@ -57,8 +58,15 @@ def _describe(label: str, locus: Locus) -> str:
     return HUMAN.get(label, label)
 
 
-def explain_sequence(seq: str, locus: Locus, depth: int = 0) -> Explanation:
-    """Identify one consensus sequence."""
+def explain_sequence(seq: str, locus: Locus, depth: int = 0,
+                     partial_fraction: float = 0.0) -> Explanation:
+    """Identify one consensus sequence.
+
+    `partial_fraction` is the share of reads in this mode that lost an end to
+    trimming. A peak made of truncated molecules is the same PCR product as
+    the full-length peak, shifted left - saying so stops it being read as an
+    extra band on the gel.
+    """
     fwd, rrc = locus.fwd, rc(locus.rev)
     f_hits = find_all(seq, fwd)
     r_hits = find_all(seq, rrc)
@@ -92,11 +100,14 @@ def explain_sequence(seq: str, locus: Locus, depth: int = 0) -> Explanation:
             return Explanation("primer_dimer", HUMAN["primer_dimer"], id_dimer, 1,
                                f"{len(unit)} bp insert-free primer pair", True)
         call = classify_read(unit, locus)
-        if call.allele_class in ("unalignable", "too_short"):
+        if call.allele_class in ("unalignable", "too_short",
+                                 "uninformative_partial"):
             return Explanation("off_target", HUMAN["off_target"], call.identity, 1,
                                f"both primers, interior identity {call.identity:.2f}", True)
-        return Explanation(call.allele_class, _describe(call.allele_class, locus),
-                           call.identity, 1,
+        desc = _describe(call.allele_class, locus)
+        if partial_fraction > 0.5:
+            desc += ", end truncated"
+        return Explanation(call.allele_class, desc, call.identity, 1,
                            f"net {call.net:+d} bp vs wild type", False)
 
     # no complete unit
@@ -104,14 +115,24 @@ def explain_sequence(seq: str, locus: Locus, depth: int = 0) -> Explanation:
     if len(seq) <= len(locus.dimer_allele) + 15 and id_dimer >= 0.70:
         return Explanation("primer_dimer", HUMAN["primer_dimer"], id_dimer, 0,
                            f"{len(seq)} bp, matches primer pair", True)
-    if f_hits and not r_hits:
-        return Explanation("truncated_fwd_only", HUMAN["truncated_fwd_only"],
-                           identity_to(seq, locus.amplicon), 0,
-                           "forward primer only", True)
-    if r_hits and not f_hits:
-        return Explanation("truncated_rev_only", HUMAN["truncated_rev_only"],
-                           identity_to(seq, locus.amplicon), 0,
-                           "reverse primer only", True)
+    for one_primer, clip, label in ((f_hits and not r_hits, "end", "3' end"),
+                                    (r_hits and not f_hits, "begin", "5' end")):
+        if not one_primer:
+            continue
+        anchored = seq[f_hits[0][0]:] if clip == "end" else seq[:r_hits[-1][1]]
+        call = classify_read(anchored, locus, clip=clip)
+        if call.allele_class not in ("uninformative_partial", "too_short",
+                                     "unalignable"):
+            return Explanation(
+                call.allele_class,
+                f"{_describe(call.allele_class, locus)}, {label} truncated",
+                call.identity, 0,
+                f"one primer lost to end trimming; net {call.net:+d} bp", False)
+        return Explanation(
+            "truncated_fwd_only" if clip == "end" else "truncated_rev_only",
+            HUMAN["truncated_fwd_only" if clip == "end" else "truncated_rev_only"],
+            identity_to(anchored, locus.amplicon, clip), 0,
+            f"{label} truncated, does not span both cuts", True)
     id_wt = identity_to(seq, locus.amplicon)
     return Explanation("unknown", HUMAN["unknown"], id_wt, 0,
                        f"no primer found; identity to amplicon {id_wt:.2f}", True)

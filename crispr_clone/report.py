@@ -103,10 +103,11 @@ def write_report(results: Sequence[SampleResult], path: str, locus,
         parts.append("<h3>Alleles</h3>")
         parts.append(_table(
             ["allele", "class", "length", "reads", "fraction", "95% CI", "net bp",
-             "frame", "control floor", "verdict"],
+             "frame", "protein consequence", "control floor", "verdict"],
             [[a.allele_id, a.allele_class, a.median_length, f"{a.n_reads:,}",
               f"{a.fraction * 100:.1f}%",
               f"{a.ci_low * 100:.1f}-{a.ci_high * 100:.1f}%", f"{a.net:+d}", a.frame,
+              html.escape(a.consequence),
               f"{a.control_fraction * 100:.1f}%" if a.control_fraction else "-",
               ("<span class='flag'>within control noise</span>" if a.within_control_noise
                else ("minor" if a.minor else "called"))]

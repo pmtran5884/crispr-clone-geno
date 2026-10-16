@@ -115,6 +115,26 @@ logic simply switches off).
 
 ---
 
+## What real ONT runs do to this assay
+
+Three behaviours showed up on the first real run and are handled explicitly:
+
+* **End trimming.** A large share of reads lose 10-15 bp off one end, which
+  destroys one primer site. Those reads are not discarded: they are aligned
+  with that reference end free and genotyped whenever they still span both
+  cut sites, which on a 167 bp amplicon is almost always. Recovering them
+  roughly tripled usable depth. A truncated read that stops short of a cut
+  site is refused, because it matches wild type perfectly and would bias
+  every clone toward wild type.
+* **Concatemers.** Ligation during library prep joins copies of the same
+  molecule. Short alleles concatemerise more readily, so discarding
+  concatemers would under-count deletion alleles. Each concatemer read is
+  genotyped once from its first complete unit and reported separately as a QC
+  number, not as an artifact that reduces the usable depth.
+* **Length modes are not all bands.** A truncation peak sits ~12 bp below its
+  parent product and is labelled "end truncated" rather than presented as a
+  second PCR product.
+
 ## How the genotype is decided
 
 1. **Read prep.** Reads are oriented, primers located by fuzzy search, and the
@@ -133,7 +153,14 @@ logic simply switches off).
    number 2-4 by multinomial likelihood; the smallest copy number that explains
    the data is preferred and is reported, not assumed. **BHK-21 is
    hyperdiploid - a strict biallelic model would be wrong.**
-6. **Call.** Three or more alleles means mixed well, unless all of them disrupt
+6. **Protein consequence.** Every allele is translated from the annotated
+   reading frame. Frame arithmetic alone is not enough: an insertion whose
+   length is a multiple of three keeps the downstream frame but can carry a
+   stop codon in the inserted sequence, and two indels that cancel out leave
+   the stretch between them in a shifted frame. Both are decided by
+   translating the allele, and only alleles that truly destroy the protein
+   count toward a knockout call.
+7. **Call.** Three or more alleles means mixed well, unless all of them disrupt
    the gene. Residual wild type above the error floor but below the clonal
    threshold is reported as `KO_with_residual_wt`, not as a clean knockout.
 
@@ -198,6 +225,9 @@ assay is designed to produce, are unaffected.
   a 2:2 tetraploid is indistinguishable from a 1:1 diploid by sequencing.
 * An allele whose amplicon fails to amplify at all is invisible here. A clone
   that passes should still be confirmed at the protein level.
+* A premature stop is predicted from the amplicon window only. A frameshift
+  whose stop falls outside the amplicon is reported as "expected", not
+  observed.
 
 ## Layout
 
