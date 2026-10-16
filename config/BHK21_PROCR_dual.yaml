@@ -1,0 +1,58 @@
+name: BHK21_PROCR_dual
+species: mesocricetus_auratus
+assembly: MesAur1.0
+gene:
+  symbol: PROCR
+  id: ENSMAUG00000015719
+  strand: -1
+transcript: ENSMAUT00000020583
+region:
+  seq_region: KB708301.1
+  start: 1924744
+  end: 1924910
+  amplicon_strand: '-'
+primers:
+  fwd: CTGACGCTGAGCTGACTCTT
+  rev: CAGCTGGAGGATGGTGACTT
+amplicon:
+  length: 167
+  seq: CTGACGCTGAGCTGACTCTTCCTCCAGGCTCTCGAAGCCTGCATATGCTCCAGATCTCCTACTTCCAAAACTCCACTCACGTGAGACATCAGGGCAATGCCTCGATGGGGACGATCCTGACACACACGTTGGAAGGCACCAACAACAAAGTCACCATCCTCCAGCTG
+guides:
+- name: g1
+  seq: GTGAGTGGAGTTTTGGAAGT
+  strand: '-'
+  pam: AGG
+  start: 60
+  end: 80
+  cut: 63
+- name: g2
+  seq: ATCCTGACACACACGTTGGA
+  strand: +
+  pam: AGG
+  start: 113
+  end: 133
+  cut: 130
+coding:
+  exonic_span:
+  - 27
+  - 167
+  exons:
+  - ENSMAUE00000128933
+  cds_offset_of_exonic_start: 79
+  cds_length: 741
+  frame_of_exonic_start: 1
+  codon_of_exonic_start: 27
+deletion:
+  cut_left: 63
+  cut_right: 130
+  size: 67
+  join_length: 100
+  frameshift: true
+  cassette: TCCAAAACTCCACTCACGTGAGACATCAGGGCAATGCCTCGATGGGGACGATCCTGACACACACGTT
+  join_allele: CTGACGCTGAGCTGACTCTTCCTCCAGGCTCTCGAAGCCTGCATATGCTCCAGATCTCCTACTGGAAGGCACCAACAACAAAGTCACCATCCTCCAGCTG
+  inversion_allele: CTGACGCTGAGCTGACTCTTCCTCCAGGCTCTCGAAGCCTGCATATGCTCCAGATCTCCTACTAACGTGTGTGTCAGGATCGTCCCCATCGAGGCATTGCCCTGATGTCTCACGTGAGTGGAGTTTTGGAGGAAGGCACCAACAACAAAGTCACCATCCTCCAGCTG
+meta:
+  built_by: tools/build_amplicon.py
+  source: Ensembl REST https://rest.ensembl.org
+  command: --species mesocricetus_auratus --gene PROCR --fwd CTGACGCTGAGCTGACTCTT --rev CAGCTGGAGGATGGTGACTT
+    --guide g1=GTGAGTGGAGTTTTGGAAGT --guide g2=ATCCTGACACACACGTTGGA --name BHK21_PROCR_dual --out config/BHK21_PROCR_dual.yaml

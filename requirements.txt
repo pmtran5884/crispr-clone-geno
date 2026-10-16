@@ -1,0 +1,8 @@
+edlib
+parasail
+pyspoa
+pyyaml
+matplotlib
+numpy
+requests
+pytest

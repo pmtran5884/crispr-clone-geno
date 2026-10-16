@@ -1,0 +1,11 @@
+sample	alleles	artifacts	n_reads
+WT_control	wt:1.0		400
+clone01_homoKO	join:1.0		400
+clone02_homoKO_resected	join_resect6:0.52;join:0.48		400
+clone03_het	join:0.5;wt:0.5		400
+clone04_compound	join:0.5;indel_g1:0.5		400
+clone05_inversion	inversion:1.0		400
+clone06_singlecut	indel_g2:0.5;wt:0.5		400
+clone07_nonclonal	join:0.55;wt:0.3;join_resect6:0.15		400
+clone08_homoKO_dirty	join:1.0	dimer:0.15;concatemer2:0.08;offtarget:0.1;truncated:0.05	400
+clone09_het_dirty	join:0.5;wt:0.5	dimer:0.2;concatemer2:0.05;truncated:0.05	400
