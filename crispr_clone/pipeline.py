@@ -93,7 +93,8 @@ def classify_reads(reads: Sequence[PreppedRead], locus: Locus
 def run_sample(sample: str, inputs: Sequence[str], locus: Locus, outdir: str,
                max_reads: int | None = None, min_mode_frac: float = 0.01,
                min_mode_reads: int = 10, min_allele_frac: float = 0.10,
-               min_depth: int = 200, make_figures: bool = True,
+               min_depth: int = 200, max_copy: int = 4,
+               make_figures: bool = True,
                control_event_freq: dict | None = None,
                control_alleles: Sequence[Allele] | None = None) -> SampleResult:
     paths: list[str] = []
@@ -140,7 +141,8 @@ def run_sample(sample: str, inputs: Sequence[str], locus: Locus, outdir: str,
                      if not k.startswith("concatemer"))
 
     gcall = call_genotype(sample, alleles, len(reads), n_artifact,
-                          min_allele_frac=min_allele_frac, min_depth=min_depth)
+                          min_allele_frac=min_allele_frac, min_depth=min_depth,
+                          max_copy=max_copy)
     pile = pileup(seqs, locus, clips=clips)
 
     figures: dict[str, str] = {}

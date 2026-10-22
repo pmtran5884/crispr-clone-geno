@@ -84,9 +84,11 @@ def write_report(results: Sequence[SampleResult], path: str, locus,
     for r in results:
         c = r.call
         parts.append(f"<h2>{html.escape(r.sample)}</h2>")
+        fit = (f"fitted ratio {c.fitted_ratio} at copy number {c.copy_number} "
+               f"(max deviation {c.fit_max_dev:.3f})" if c.copy_number else
+               "more alleles than the locus has copies, so no ratio was fitted")
         parts.append(f"<p><span class='call {BADGE.get(c.call,'amb')}'>{c.call}</span> "
-                     f"&nbsp;{c.zygosity}, fitted ratio {c.fitted_ratio} at copy number "
-                     f"{c.copy_number} (max deviation {c.fit_max_dev:.3f})</p>")
+                     f"&nbsp;{c.zygosity}, {fit}</p>")
         if c.note:
             parts.append(f"<p class='note'>{html.escape(c.note)}</p>")
         if c.flags:

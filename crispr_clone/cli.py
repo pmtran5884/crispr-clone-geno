@@ -40,6 +40,10 @@ def main(argv=None):
     p.add_argument("--min-allele-frac", type=float, default=0.10)
     p.add_argument("--min-mode-frac", type=float, default=0.01)
     p.add_argument("--min-depth", type=int, default=200)
+    p.add_argument("--max-copy", type=int, default=4,
+                   help="highest locus copy number to fit (2 for a verified "
+                        "diploid line; more alleles than copies means the well "
+                        "holds more than one cell)")
     p.add_argument("--no-figures", action="store_true")
     p.add_argument("--skip-preflight", action="store_true")
     a = p.parse_args(argv)
@@ -64,7 +68,8 @@ def main(argv=None):
         r = run_sample(name, [path], locus, a.out, max_reads=a.max_reads,
                        min_mode_frac=a.min_mode_frac,
                        min_allele_frac=a.min_allele_frac,
-                       min_depth=a.min_depth, make_figures=not a.no_figures,
+                       min_depth=a.min_depth, max_copy=a.max_copy,
+                       make_figures=not a.no_figures,
                        control_event_freq=None if name == control_name else control_freq,
                        control_alleles=None if name == control_name else control_alleles)
         if name == control_name:

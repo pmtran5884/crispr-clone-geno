@@ -163,6 +163,17 @@ def test_genotype_ladder(locus):
     assert call_genotype("x", wt, 200, 0).call == "wild_type"
 
 
+def test_more_alleles_than_copies_is_not_clonal(locus):
+    # four alleles cannot sit in one diploid cell, however they are composed
+    wt = locus.amplicon
+    seqs = ([locus.join_allele] * 50 + [wt[:63] + "A" + wt[63:]] * 50
+            + [wt[:129] + wt[131:]] * 50 + [wt[:locus.cut_left - 3] + wt[locus.cut_right:]] * 50)
+    alleles = call_alleles(seqs, locus)
+    call = call_genotype("x", alleles, 200, 0, max_copy=2)
+    assert call.call == "non_clonal"
+    assert any("more_alleles_than_copies" in f for f in call.flags)
+
+
 def test_fit_ratio_prefers_parsimonious_copy_number():
     cn, comp, dev = fit_ratio([0.5, 0.5], [100, 100])
     assert (cn, comp) == (2, (1, 1))

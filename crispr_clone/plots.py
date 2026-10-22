@@ -111,8 +111,11 @@ def allele_composition(alleles: Sequence[Allele], call: GenotypeCall,
     ax.set_yticks([])
     ax.set_xlabel("fraction of on-target reads "
                   "(bracket: 95% Wilson CI width, centred on each allele)")
-    ax.set_title(f"{sample}: {call.call}  -  fitted allele ratio {call.fitted_ratio} "
-                 f"(copy number {call.copy_number}), {call.n_on_target:,} on-target reads")
+    fit = (f"fitted allele ratio {call.fitted_ratio} (copy number {call.copy_number})"
+           if call.copy_number else
+           f"{len([a for a in alleles if not a.minor])} alleles cannot fit one cell "
+           f"- ratio not fitted")
+    ax.set_title(f"{sample}: {call.call}  -  {fit}, {call.n_on_target:,} on-target reads")
     fig.savefig(path)
     plt.close(fig)
     return path

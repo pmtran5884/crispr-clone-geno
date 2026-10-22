@@ -109,7 +109,7 @@ def fit_ratio(fractions: Sequence[float], counts: Sequence[int],
 def call_genotype(sample: str, alleles: Sequence[Allele], n_total: int,
                   n_artifact: int, min_allele_frac: float = 0.10,
                   min_depth: int = 200, clonal_dev: float = 0.12,
-                  wt_floor: float = 0.02) -> GenotypeCall:
+                  wt_floor: float = 0.02, max_copy: int = 4) -> GenotypeCall:
     n_on = sum(a.n_reads for a in alleles)
     flags: list[str] = []
 
@@ -124,7 +124,7 @@ def call_genotype(sample: str, alleles: Sequence[Allele], n_total: int,
     disr = sum(a.fraction for a in alleles if is_disrupting(a))
 
     cn, comp, dev = fit_ratio([a.fraction for a in major],
-                              [a.n_reads for a in major])
+                              [a.n_reads for a in major], max_copy=max_copy)
     ratio = ":".join(str(c) for c in comp) if comp else "-"
     clonal = bool(comp) and dev <= clonal_dev
 
@@ -142,7 +142,12 @@ def call_genotype(sample: str, alleles: Sequence[Allele], n_total: int,
     if not clonal:
         flags.append("allele_ratio_not_clonal")
 
-    if len(major) >= 3:
+    if len(major) > max_copy:
+        # more distinct alleles than one cell has copies of the locus: this
+        # cannot be one genotype, whatever the alleles are
+        flags.append(f"more_alleles_than_copies({len(major)}>{max_copy})")
+        call, zyg = "non_clonal", "mixed"
+    elif len(major) >= 3:
         # a single-cell clone with three alleles is either a mixed well or a
         # polyploid clone. If every allele disrupts the gene the knockout
         # verdict stands either way; if wild type is among them it does not.
